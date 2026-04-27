@@ -25,24 +25,22 @@ env:
 
 jobs:
   sync:
-    name: "Sync Fork ← Upstream"
+    name: "Sync Fork <- Upstream"
     runs-on: ubuntu-latest
 
-    # ── Loop-protection: never re-trigger on our own bot push ─────────────────
-    if: |
-      github.actor != 'github-actions[bot]' &&
-      !contains(github.event.head_commit.message, '[skip ci]')
+    # -- Loop-protection: never re-trigger on our own bot push -----------------
+    if: github.actor != 'github-actions[bot]'
 
-    # ── Shared outputs so the failure-reporter step can read them ─────────────
+    # -- Shared outputs so the failure-reporter step can read them -------------
     outputs:
       sync_failed:    ${{ steps.rebase.outputs.sync_failed }}
       push_skipped:   ${{ steps.push.outputs.push_skipped }}
       error_summary:  ${{ steps.rebase.outputs.error_summary }}
 
     steps:
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
       # 0. INITIALISE STRUCTURED LOG FILE
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
       - name: Initialise log file
         run: |
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -55,33 +53,23 @@ jobs:
            Run ID  : ${{ github.run_id }}
           ================================================================
           LOG
-          echo "✅ Log file initialised at ${{ env.LOG_FILE }}"
+          echo "Log file initialised at ${{ env.LOG_FILE }}"
 
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
       # 1. CHECKOUT (full history)
-      # ════════════════════════════════════════════════════════════════════════
-      - name: Checkout repository — full history
+      # ========================================================================
+      - name: Checkout repository - full history
         uses: actions/checkout@v6
         with:
           ref:         ${{ env.ORIGIN_BRANCH }}
           fetch-depth: 0
 
-      # ════════════════════════════════════════════════════════════════════════
-      # 2. GENERATE GITHUB APP TOKEN
-      # ════════════════════════════════════════════════════════════════════════
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3
-        with:
-          app-id:      ${{ secrets.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-
-      # ════════════════════════════════════════════════════════════════════════
-      # 3. CONFIGURE GIT
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
+      # 2. CONFIGURE GIT
+      # ========================================================================
       - name: Configure git identity and authenticated remote
         env:
-          APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          ACCOUNT_TOKEN: ${{ secrets.TERMUXBOT2_TOKEN }}
         run: |
           {
             echo ""
@@ -91,7 +79,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          REPO_URL="https://x-access-token:${APP_TOKEN}@github.com/${{ github.repository }}.git"
+          REPO_URL="https://x-access-token:${ACCOUNT_TOKEN}@github.com/${{ github.repository }}.git"
           git remote set-url origin "${REPO_URL}"
 
           {
@@ -101,11 +89,11 @@ jobs:
             echo "  status     : OK"
           } >> "${{ env.LOG_FILE }}"
 
-          echo "✅ Git configured with App token authentication."
+          echo "Git configured with account token authentication."
 
-      # ════════════════════════════════════════════════════════════════════════
-      # 4. ENSURE UPSTREAM REMOTE (idempotent)
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
+      # 3. ENSURE UPSTREAM REMOTE (idempotent)
+      # ========================================================================
       - name: Ensure upstream remote
         id: upstream-remote
         run: |
@@ -126,11 +114,11 @@ jobs:
           if git remote get-url upstream &>/dev/null; then
             git remote set-url upstream "${UPSTREAM_URL}"
             echo "  action : updated existing remote" >> "${{ env.LOG_FILE }}"
-            echo "ℹ️  'upstream' remote updated."
+            echo "'upstream' remote updated."
           else
             git remote add upstream "${UPSTREAM_URL}"
             echo "  action : added new remote" >> "${{ env.LOG_FILE }}"
-            echo "➕ 'upstream' remote added."
+            echo "'upstream' remote added."
           fi
 
           {
@@ -138,9 +126,9 @@ jobs:
             echo "  status : OK"
           } >> "${{ env.LOG_FILE }}"
 
-      # ════════════════════════════════════════════════════════════════════════
-      # 5. FETCH UPSTREAM (with retry + structured logging)
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
+      # 4. FETCH UPSTREAM (with retry + structured logging)
+      # ========================================================================
       - name: Fetch upstream
         id: fetch
         run: |
@@ -155,7 +143,7 @@ jobs:
             local attempt=1 max=3 delay=10 output exit_code
 
             while [ $attempt -le $max ]; do
-              echo "🔄 Fetch attempt ${attempt}/${max}..."
+              echo "Fetch attempt ${attempt}/${max}..."
               output=$(git fetch upstream "${{ env.UPSTREAM_BRANCH }}" --no-tags 2>&1)
               exit_code=$?
 
@@ -163,11 +151,11 @@ jobs:
               echo "${output}" >> "${{ env.LOG_FILE }}"
 
               if [ $exit_code -eq 0 ]; then
-                echo "✅ Fetch succeeded on attempt ${attempt}."
+                echo "Fetch succeeded on attempt ${attempt}."
                 return 0
               fi
 
-              echo "⚠️  Attempt ${attempt} failed. Retrying in ${delay}s..."
+              echo "Attempt ${attempt} failed. Retrying in ${delay}s..."
               sleep $delay
               delay=$((delay * 2))
               attempt=$((attempt + 1))
@@ -178,15 +166,15 @@ jobs:
           }
 
           if ! fetch_with_retry; then
-            echo "::error::git fetch failed after 3 retries — see sync.log for details."
+            echo "::error::git fetch failed after 3 retries - see sync.log for details."
             exit 1
           fi
 
           echo "  RESULT : OK" >> "${{ env.LOG_FILE }}"
 
-      # ════════════════════════════════════════════════════════════════════════
-      # 6. REBASE AND DETECT CHANGES (with structured logging)
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
+      # 5. REBASE AND DETECT CHANGES (with structured logging)
+      # ========================================================================
       - name: Rebase onto upstream and detect changes
         id: rebase
         run: |
@@ -199,7 +187,7 @@ jobs:
           # Guard: re-attach if detached HEAD
           CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
           if [ "${CURRENT_BRANCH}" = "DETACHED" ]; then
-            echo "⚠️  Detached HEAD detected — re-attaching to ${{ env.ORIGIN_BRANCH }}"
+            echo "Detached HEAD detected - re-attaching to ${{ env.ORIGIN_BRANCH }}"
             git checkout "${{ env.ORIGIN_BRANCH }}"
             echo "  head-fix : re-attached to ${{ env.ORIGIN_BRANCH }}" >> "${{ env.LOG_FILE }}"
           fi
@@ -207,15 +195,15 @@ jobs:
           BEFORE_SHA=$(git rev-parse HEAD)
           echo "  before-sha : ${BEFORE_SHA}" >> "${{ env.LOG_FILE }}"
 
-          echo "🔀 Running: git pull upstream ${{ env.UPSTREAM_BRANCH }} --rebase"
+          echo "Running: git pull upstream ${{ env.UPSTREAM_BRANCH }} --rebase"
           REBASE_OUTPUT=$(git pull upstream "${{ env.UPSTREAM_BRANCH }}" --rebase 2>&1)
           REBASE_EXIT=$?
 
           echo "${REBASE_OUTPUT}" >> "${{ env.LOG_FILE }}"
 
           if [ $REBASE_EXIT -ne 0 ]; then
-            echo "  rebase-exit : ${REBASE_EXIT} — attempting --skip" >> "${{ env.LOG_FILE }}"
-            echo "⚠️  Rebase conflict detected (exit ${REBASE_EXIT}). Attempting --skip..."
+            echo "  rebase-exit : ${REBASE_EXIT} - attempting --skip" >> "${{ env.LOG_FILE }}"
+            echo "Rebase conflict detected (exit ${REBASE_EXIT}). Attempting --skip..."
 
             SKIP_OUTPUT=$(git rebase --skip 2>&1)
             SKIP_EXIT=$?
@@ -230,26 +218,26 @@ jobs:
               } >> "${{ env.LOG_FILE }}"
 
               echo "::error::${SUMMARY}"
-              echo "sync_failed=true"    >> "$GITHUB_OUTPUT"
+              echo "sync_failed=true"         >> "$GITHUB_OUTPUT"
               echo "error_summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
               exit 1
             fi
 
-            echo "  skip-exit : 0 — conflicts skipped" >> "${{ env.LOG_FILE }}"
-            echo "ℹ️  Conflicts skipped via --skip."
+            echo "  skip-exit : 0 - conflicts skipped" >> "${{ env.LOG_FILE }}"
+            echo "Conflicts skipped via --skip."
           fi
 
           AFTER_SHA=$(git rev-parse HEAD)
           echo "  after-sha : ${AFTER_SHA}" >> "${{ env.LOG_FILE }}"
 
           if [ "${BEFORE_SHA}" = "${AFTER_SHA}" ]; then
-            echo "✅ Already in sync — no new commits from upstream."
-            echo "  has-changes : false" >> "${{ env.LOG_FILE }}"
+            echo "Already in sync - no new commits from upstream."
+            echo "  has-changes : false"       >> "${{ env.LOG_FILE }}"
             echo "  RESULT      : OK (no changes)" >> "${{ env.LOG_FILE }}"
             echo "has_changes=false"  >> "$GITHUB_OUTPUT"
           else
             COUNT=$(git rev-list --count "${BEFORE_SHA}".."${AFTER_SHA}" 2>/dev/null || echo "?")
-            echo "🆕 ${COUNT} new commit(s) from upstream."
+            echo "${COUNT} new commit(s) from upstream."
             {
               echo "  has-changes  : true"
               echo "  new-commits  : ${COUNT}"
@@ -260,9 +248,9 @@ jobs:
 
           echo "sync_failed=false" >> "$GITHUB_OUTPUT"
 
-      # ════════════════════════════════════════════════════════════════════════
-      # 7. PUSH TO ORIGIN (with retry + structured logging)
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
+      # 6. PUSH TO ORIGIN (with retry + structured logging)
+      # ========================================================================
       - name: Push to origin
         id: push
         if: steps.rebase.outputs.has_changes == 'true'
@@ -278,7 +266,7 @@ jobs:
             local attempt=1 max=3 delay=8 output exit_code
 
             while [ $attempt -le $max ]; do
-              echo "🚀 Push attempt ${attempt}/${max}..."
+              echo "Push attempt ${attempt}/${max}..."
               output=$(git push origin "${{ env.ORIGIN_BRANCH }}" 2>&1)
               exit_code=$?
 
@@ -286,11 +274,11 @@ jobs:
               echo "${output}" >> "${{ env.LOG_FILE }}"
 
               if [ $exit_code -eq 0 ]; then
-                echo "✅ Push succeeded on attempt ${attempt}."
+                echo "Push succeeded on attempt ${attempt}."
                 return 0
               fi
 
-              echo "⚠️  Push attempt ${attempt} failed. Retrying in ${delay}s..."
+              echo "Push attempt ${attempt} failed. Retrying in ${delay}s..."
               sleep $delay
               delay=$((delay * 2))
               attempt=$((attempt + 1))
@@ -301,24 +289,24 @@ jobs:
           }
 
           if ! push_with_retry; then
-            echo "::error::git push failed after 3 retries — see sync.log for details."
+            echo "::error::git push failed after 3 retries - see sync.log for details."
             echo "push_skipped=false" >> "$GITHUB_OUTPUT"
             exit 1
           fi
 
           echo "  RESULT : OK" >> "${{ env.LOG_FILE }}"
           echo "push_skipped=false" >> "$GITHUB_OUTPUT"
-          echo "✅ Sync complete — changes pushed to origin/${{ env.ORIGIN_BRANCH }}."
+          echo "Sync complete - changes pushed to origin/${{ env.ORIGIN_BRANCH }}."
 
-      - name: Log — fork already in sync
+      - name: Log - fork already in sync
         if: steps.rebase.outputs.has_changes == 'false'
         run: |
-          echo "ℹ️  Fork is already in sync with upstream. Push skipped."
+          echo "Fork is already in sync with upstream. Push skipped."
           echo "push_skipped=true" >> "$GITHUB_OUTPUT"
 
-      # ════════════════════════════════════════════════════════════════════════
-      # 8. FINALISE LOG
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
+      # 7. FINALISE LOG
+      # ========================================================================
       - name: Finalise log file
         if: always()
         run: |
@@ -329,11 +317,11 @@ jobs:
             echo " Finished : $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             echo "================================================================"
           } >> "${{ env.LOG_FILE }}"
-          echo "📄 Final log size: $(wc -c < "${{ env.LOG_FILE }}") bytes"
+          echo "Final log size: $(wc -c < "${{ env.LOG_FILE }}") bytes"
 
-      # ════════════════════════════════════════════════════════════════════════
-      # 9. UPLOAD LOG ARTIFACT (always, even on failure)
-      # ════════════════════════════════════════════════════════════════════════
+      # ========================================================================
+      # 8. UPLOAD LOG ARTIFACT (always, even on failure)
+      # ========================================================================
       - name: Upload sync log as artifact
         if: always()
         uses: actions/upload-artifact@v7
@@ -342,21 +330,20 @@ jobs:
           path: ${{ env.LOG_FILE }}
           retention-days: 14
 
-      # ════════════════════════════════════════════════════════════════════════
-      # 10. ENTERPRISE FAILURE REPORTER
-      #     — Smart deduplication: comment on existing issue, else create new
-      # ════════════════════════════════════════════════════════════════════════
-      - name: "Failure Reporter — create or update GitHub Issue"
+      # ========================================================================
+      # 9. ENTERPRISE FAILURE REPORTER
+      #    Smart deduplication: comment on existing issue, else create new
+      # ========================================================================
+      - name: "Failure Reporter - create or update GitHub Issue"
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.TERMUXBOT2_TOKEN }}
         run: |
-          # ── helpers ──────────────────────────────────────────────────────────
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           LABEL="${{ env.SYNC_LABEL }}"
 
-          # ── determine which step failed ───────────────────────────────────────
+          # -- determine which step failed -------------------------------------
           if   [ "${{ steps.upstream-remote.outcome }}" = "failure" ]; then
             FAILED_STEP="Upstream Remote Setup"
             SHORT_SUMMARY="Could not add or update the upstream remote. Repository may not be a fork, or metadata is unavailable."
@@ -379,7 +366,7 @@ jobs:
           echo "Failed step  : ${FAILED_STEP}"
           echo "Short summary: ${SHORT_SUMMARY}"
 
-          # ── read + truncate structured log (last 200 lines) ──────────────────
+          # -- read + truncate structured log (last 200 lines) -----------------
           RAW_LOG=""
           if [ -f "${{ env.LOG_FILE }}" ]; then
             TOTAL_LINES=$(wc -l < "${{ env.LOG_FILE }}")
@@ -387,9 +374,9 @@ jobs:
             echo "Log file: ${TOTAL_LINES} total lines"
 
             if [ "${TOTAL_LINES}" -gt "${TAIL_LINES}" ]; then
-              TRUNCATED_NOTICE="[LOG TRUNCATED — showing last ${TAIL_LINES} of ${TOTAL_LINES} lines]"
+              TRUNCATED_NOTICE="[LOG TRUNCATED - showing last ${TAIL_LINES} of ${TOTAL_LINES} lines]"
               RAW_LOG="${TRUNCATED_NOTICE}"$'\n'"$(tail -n "${TAIL_LINES}" "${{ env.LOG_FILE }}")"
-              echo "⚠️  Log trimmed to last ${TAIL_LINES} lines."
+              echo "Log trimmed to last ${TAIL_LINES} lines."
             else
               RAW_LOG=$(cat "${{ env.LOG_FILE }}")
             fi
@@ -397,15 +384,15 @@ jobs:
             RAW_LOG="Log file not found at ${{ env.LOG_FILE }}."
           fi
 
-          # ── ensure the dedup label exists ─────────────────────────────────────
+          # -- ensure the dedup label exists -----------------------------------
           gh label create "${LABEL}" \
             --description "Automated label for upstream sync failures" \
             --color "B60205" \
             --repo "${{ github.repository }}" 2>/dev/null \
-            && echo "✅ Label '${LABEL}' created." \
-            || echo "ℹ️  Label '${LABEL}' already exists."
+            && echo "Label '${LABEL}' created." \
+            || echo "Label '${LABEL}' already exists."
 
-          # ── search for an existing OPEN issue with this label ─────────────────
+          # -- search for an existing OPEN issue with this label ---------------
           EXISTING_ISSUE_NUMBER=$(gh issue list \
             --repo "${{ github.repository }}" \
             --label "${LABEL}" \
@@ -413,17 +400,16 @@ jobs:
             --json number \
             --jq '.[0].number // empty' 2>/dev/null || true)
 
-          # ── branch: comment vs create ─────────────────────────────────────────
-          # NOTE: Markdown is written to temp files and passed via --body-file.
-          # This avoids embedding pipe characters (|) directly in the YAML scalar,
-          # which confuses YAML parsers into treating them as block indicators.
+          # -- branch: comment vs create ---------------------------------------
+          # Markdown is written to temp files and passed via --body-file to
+          # avoid pipe characters (|) appearing in the YAML scalar, which
+          # confuses YAML parsers into treating them as block indicators.
           if [ -n "${EXISTING_ISSUE_NUMBER}" ]; then
-            # ── COMMENT ON EXISTING ISSUE ─────────────────────────────────────
-            echo "💬 Open issue #${EXISTING_ISSUE_NUMBER} found — appending comment."
+            echo "Open issue #${EXISTING_ISSUE_NUMBER} found - appending comment."
 
             COMMENT_FILE=$(mktemp /tmp/comment_body.XXXXXX.md)
             {
-              printf '## \360\237\224\201 Recurring Failure \342\200\224 %s\n\n' "${TIMESTAMP}"
+              printf '## Recurring Failure - %s\n\n' "${TIMESTAMP}"
               printf 'Failed Step : `%s`\n' "${FAILED_STEP}"
               printf 'Run ID      : [#${{ github.run_id }}](%s)\n' "${RUN_URL}"
               printf 'Branch      : `${{ env.ORIGIN_BRANCH }}`\n'
@@ -431,8 +417,7 @@ jobs:
               printf '\n### Error Summary\n\n%s\n' "${SHORT_SUMMARY}"
               printf '\n### Structured Logs\n\n```text\n%s\n```\n' "${RAW_LOG}"
               printf '\n---\n'
-              printf '> \360\237\224\227 [View full workflow run](%s) \302\267 \360\237\223\245 [Download sync log artifact](%s#artifacts)\n' \
-                "${RUN_URL}" "${RUN_URL}"
+              printf '> [View full workflow run](%s)\n' "${RUN_URL}"
             } > "${COMMENT_FILE}"
 
             gh issue comment "${EXISTING_ISSUE_NUMBER}" \
@@ -440,15 +425,14 @@ jobs:
               --body-file "${COMMENT_FILE}"
 
             rm -f "${COMMENT_FILE}"
-            echo "✅ Comment added to issue #${EXISTING_ISSUE_NUMBER}."
+            echo "Comment added to issue #${EXISTING_ISSUE_NUMBER}."
 
           else
-            # ── CREATE NEW ISSUE ──────────────────────────────────────────────
-            echo "🆕 No open issue found — creating a new one."
+            echo "No open issue found - creating a new one."
 
             ISSUE_FILE=$(mktemp /tmp/issue_body.XXXXXX.md)
             {
-              printf '## \342\235\214 Sync Failure Report\n\n'
+              printf '## Sync Failure Report\n\n'
               printf 'Branch    : `${{ env.ORIGIN_BRANCH }}`\n'
               printf 'Run ID    : [#${{ github.run_id }}](%s)\n' "${RUN_URL}"
               printf 'Workflow  : `${{ github.workflow }}`\n'
@@ -473,7 +457,7 @@ jobs:
               --label "${LABEL}")
 
             rm -f "${ISSUE_FILE}"
-            echo "✅ Created new issue: ${NEW_ISSUE_URL}"
+            echo "Created new issue: ${NEW_ISSUE_URL}"
           fi
 
           echo "::endgroup::"
