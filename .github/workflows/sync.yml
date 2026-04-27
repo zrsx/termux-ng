@@ -102,14 +102,8 @@ jobs:
             echo "=== UPSTREAM REMOTE ==="
           } >> "${{ env.LOG_FILE }}"
 
-          if [ -z "${{ github.event.repository.parent.full_name }}" ]; then
-            MSG="Repository has no upstream (not a fork or metadata unavailable)."
-            echo "::error::${MSG}"
-            echo "  ERROR: ${MSG}" >> "${{ env.LOG_FILE }}"
-            exit 1
-          fi
 
-          UPSTREAM_URL="https://github.com/${{ github.event.repository.parent.full_name }}.git"
+          UPSTREAM_URL="https://github.com/termux/termux-packages.git"
 
           if git remote get-url upstream &>/dev/null; then
             git remote set-url upstream "${UPSTREAM_URL}"
