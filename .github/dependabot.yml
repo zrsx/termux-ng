@@ -1,6 +1,24 @@
 version: 2
 updates:
-- package-ecosystem: github-actions
-  directory: /
-  schedule:
-    interval: daily
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: daily
+    rebase-strategy: auto
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+    
+    commit-message:
+      prefix: "deps(actions)"
+      include: scope
+
+    labels:
+      - dependencies
+      - github-actions
+    reviewers:
+      - strsp/core-dev
+    allow:
+      - dependency-type: "all"
