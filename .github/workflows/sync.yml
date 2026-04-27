@@ -349,7 +349,7 @@ jobs:
       - name: "Failure Reporter — create or update GitHub Issue"
         if: failure()
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.TERMUXBOT2_TOKEN }}
         run: |
           # ── helpers ──────────────────────────────────────────────────────────
           TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -357,7 +357,10 @@ jobs:
           LABEL="${{ env.SYNC_LABEL }}"
 
           # ── determine which step failed ───────────────────────────────────────
-          if   [ "${{ steps.fetch.outcome }}"  = "failure" ]; then
+          if   [ "${{ steps.upstream-remote.outcome }}" = "failure" ]; then
+            FAILED_STEP="Upstream Remote Setup"
+            SHORT_SUMMARY="Could not add or update the upstream remote. Repository may not be a fork, or metadata is unavailable."
+          elif [ "${{ steps.fetch.outcome }}"  = "failure" ]; then
             FAILED_STEP="Fetch Upstream"
             SHORT_SUMMARY="git fetch from upstream failed after 3 retries with exponential back-off."
           elif [ "${{ steps.rebase.outcome }}" = "failure" ]; then
