@@ -61,7 +61,7 @@ jobs:
       # 1. CHECKOUT (full history)
       # ════════════════════════════════════════════════════════════════════════
       - name: Checkout repository — full history
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref:         ${{ env.ORIGIN_BRANCH }}
           fetch-depth: 0
@@ -336,7 +336,7 @@ jobs:
       # ════════════════════════════════════════════════════════════════════════
       - name: Upload sync log as artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sync-log-${{ github.run_id }}
           path: ${{ env.LOG_FILE }}
