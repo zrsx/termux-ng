@@ -30,7 +30,7 @@ permissions: {} # none
 concurrency:
   # if this is a PR event, group = "pr-<number>", otherwise group = run_id so it never collides with other runs
   group: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
-  # only cancel in-progress when it’s a PR
+  # only cancel in-progress when it's a PR
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -297,22 +297,26 @@ jobs:
         # Files containing certain symbols (e.g. ":") will cause failure in actions/upload-artifact.
         # Archiving *.deb files in a tarball to avoid issues with uploading.
         tar cf artifacts/debs-${{ matrix.target_arch }}-${{ github.sha }}.tar debs
+
     - name: Checksums for built *.deb files
       if: always()
       run: |
         find debs -type f -name "*.deb" -exec sha256sum "{}" \; | sort -k2 | tee checksum-${{ matrix.target_arch }}-${{ github.sha }}.txt
+
     - name: Store checksums for built *.deb files
       if: always()
       uses: actions/upload-artifact@v7
       with:
         name: checksum-${{ matrix.target_arch }}-${{ github.sha }}
         path: checksum-${{ matrix.target_arch }}-${{ github.sha }}.txt
+
     - name: Store *.deb files
       if: always()
       uses: actions/upload-artifact@v7
       with:
         name: debs-${{ matrix.target_arch }}-${{ github.sha }}
         path: ./artifacts
+
     - name: AppArmor Logs
       if: always()
       run: |
@@ -325,20 +329,25 @@ jobs:
     steps:
     - name: Clone repository
       uses: actions/checkout@v6
+
     - name: Randomise buildorder.py test
       run: ./scripts/bin/test-buildorder-random
+
     - name: Randomise buildorder.py test (aarch64)
       env:
         TERMUX_ARCH: aarch64
       run: ./scripts/bin/test-buildorder-random
+
     - name: Randomise buildorder.py test (arm)
       env:
         TERMUX_ARCH: arm
       run: ./scripts/bin/test-buildorder-random
+
     - name: Randomise buildorder.py test (i686)
       env:
         TERMUX_ARCH: i686
       run: ./scripts/bin/test-buildorder-random
+
     - name: Randomise buildorder.py test (x86_64)
       env:
         TERMUX_ARCH: x86_64
@@ -347,16 +356,18 @@ jobs:
   upload-test:
     permissions:
       contents: read
-    if: github.repository == 'termux/termux-packages' && github.ref != 'refs/heads/master'
+    if: github.repository == 'strsp/termux-ng' && github.ref != 'refs/heads/master'
     needs: build
     runs-on: ubuntu-slim
     steps:
     - name: Clone repository
       uses: actions/checkout@v6
+
     - name: Get *.deb files
       uses: actions/download-artifact@v8
       with:
         path: ./
+
     - name: Check packages using Packages.bz2
       run: |
         if [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
@@ -411,63 +422,127 @@ jobs:
         fi
 
   upload:
+    if: >
+      github.event_name != 'pull_request' &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.ref == 'refs/heads/master' ||
+       startsWith(github.ref, 'refs/heads/dev'))
+    needs: build
     concurrency: ${{ github.workflow }}
     permissions:
-      contents: read
-    if: github.repository == 'termux/termux-packages' && github.ref == 'refs/heads/master'
-    needs: build
-    runs-on: ubuntu-slim
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-24.04
     steps:
+    - name: Generate GitHub App token
+      id: app-token
+      uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3
+      with:
+        client-id: ${{ secrets.APP_ID }}
+        private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
     - name: Clone repository
       uses: actions/checkout@v6
+      with:
+        fetch-depth: 0
+        token: ${{ steps.app-token.outputs.token }}
+
     - name: Get *.deb files
       uses: actions/download-artifact@v8
       with:
         path: ./
-    - name: Upload to packages.termux.dev
-      env:
-        REPOSITORY_URL: https://packages.termux.dev/aptly-api
-        GITHUB_SHA: ${{ github.sha }}
-        APTLY_API_AUTH: ${{ secrets.APTLY_API_AUTH }}
-        GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-      run: |
-        source scripts/aptly_api.sh
 
-        for archive in debs-*/debs-{aarch64,arm,i686,x86_64}-${{ github.sha }}.tar; do
-          tar xf "$archive"
+    - name: Extract tarballs and collect debs per package
+      id: collect
+      run: |
+        mkdir -p ./all-debs
+
+        find . -name '*.tar' | while read tar_file; do
+          tar xf "$tar_file" -C ./all-debs --strip-components=1 2>/dev/null || \
+          tar xf "$tar_file" -C ./all-debs 2>/dev/null || true
         done
 
-        for repo in $(jq --raw-output 'del(.pkg_format) | keys | .[]' repo.json); do
-          export REPOSITORY_NAME=$(jq --raw-output '.["'$repo'"].name' repo.json)
-          export REPOSITORY_DISTRIBUTION=$(jq --raw-output '.["'$repo'"].distribution' repo.json)
+        declare -A seen
+        declare -a all_pkgs=()
+        while IFS= read -r pkg; do
+          [[ -z "$pkg" ]] && continue
+          if [[ -z "${seen[$pkg]+x}" ]]; then
+            seen[$pkg]=1
+            all_pkgs+=("$pkg")
+          fi
+        done < <(find ./all-debs -name 'built_*_packages.txt' -exec cat {} +)
 
-          # Upload file to temporary directory.
-          uploaded_files=false
-          shopt -s nullglob
+        echo "packages_json=$(printf '%s\n' "${all_pkgs[@]}" | jq -R . | jq -sc .)" >> $GITHUB_OUTPUT
 
-          if [ -f debs/built_${REPOSITORY_NAME}_packages.txt ]; then
-            for filename in $(cat debs/built_${REPOSITORY_NAME}_packages.txt | sed -E 's/(..*)/debs\/\1_\*.deb debs\/\1-static_\*.deb/g'); do
-              if ! aptly_upload_file "$filename"; then
-                exit 1
-              fi
+    - name: Prepare per-package release metadata
+      id: release-meta
+      run: |
+        packages=$(echo '${{ steps.collect.outputs.packages_json }}' | jq -r '.[]')
 
-              uploaded_files=true
-            done
-            shopt -u nullglob
+        mkdir -p ./per-pkg-release
 
-            # Publishing repository changes.
-            if [ "$uploaded_files" = "true" ]; then
-              if ! aptly_add_to_repo; then
-                exit 1
-              fi
+        for pkg in $packages; do
+          TAG="${pkg}"
 
-              # Usually temporary directory is deleted automatically, but in certain cases it is left.
-              aptly_delete_dir
+          mapfile -d '' deb_files < <(
+            find ./all-debs -type f \( -name "${pkg}_*.deb" -o -name "${pkg}-static_*.deb" \) -print0
+          )
 
-              # Final part to make changes appear in web root.
-              if ! aptly_publish_repo; then
-                exit 1
-              fi
-            fi
+          if [[ "${#deb_files[@]}" -eq 0 ]]; then
+            echo "No .deb files found for '${pkg}', skipping."
+            continue
+          fi
+
+          pkg_dir="./per-pkg-release/${pkg}"
+          mkdir -p "$pkg_dir"
+
+          for deb in "${deb_files[@]}"; do
+            cp "$deb" "$pkg_dir/"
+          done
+
+          # Write tag and title so the next matrix-style step can consume them
+          echo "$TAG" > "$pkg_dir/TAG"
+          echo "${pkg}" > "$pkg_dir/TITLE"
+          echo "Automated release for package \`${pkg}\`. Built from commit ${{ github.sha }} on ${{ github.ref_name }}." > "$pkg_dir/NOTES"
+
+          echo "Staged ${#deb_files[@]} deb(s) for package: ${pkg}  →  tag: ${TAG}"
+        done
+
+    - name: Publish releases per package
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      run: |
+        git config user.name  "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+        for pkg_dir in ./per-pkg-release/*/; do
+          [[ -f "$pkg_dir/TAG" ]] || continue
+          TAG=$(cat "$pkg_dir/TAG")
+          TITLE=$(cat "$pkg_dir/TITLE")
+          NOTES=$(cat "$pkg_dir/NOTES")
+
+          mapfile -d '' debs < <(find "$pkg_dir" -name '*.deb' -print0)
+          [[ "${#debs[@]}" -eq 0 ]] && continue
+
+          # Push the git tag if it does not exist yet
+          if ! git ls-remote --exit-code origin "refs/tags/$TAG" > /dev/null 2>&1; then
+            git tag "$TAG" "${{ github.sha }}"
+            git push origin "$TAG"
+            echo "Pushed tag: $TAG"
+          else
+            echo "Tag already exists: $TAG"
+          fi
+
+          # Create the release (or update it if it already exists) and upload debs
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" "${debs[@]}" --clobber
+            echo "Updated existing release: $TAG"
+          else
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --notes "$NOTES" \
+              --target "${{ github.sha }}" \
+              "${debs[@]}"
+            echo "Created release: $TAG"
           fi
         done
