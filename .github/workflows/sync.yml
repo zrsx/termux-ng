@@ -138,6 +138,7 @@ jobs:
 
             while [ $attempt -le $max ]; do
               echo "Fetch attempt ${attempt}/${max}..."
+              git pull
               output=$(git fetch upstream "${{ env.UPSTREAM_BRANCH }}" --no-tags 2>&1)
               exit_code=$?
 
