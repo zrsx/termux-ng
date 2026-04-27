@@ -102,7 +102,6 @@ jobs:
             echo "=== UPSTREAM REMOTE ==="
           } >> "${{ env.LOG_FILE }}"
 
-
           UPSTREAM_URL="https://github.com/termux/termux-packages.git"
 
           if git remote get-url upstream &>/dev/null; then
@@ -138,7 +137,7 @@ jobs:
 
             while [ $attempt -le $max ]; do
               echo "Fetch attempt ${attempt}/${max}..."
-              git pull
+              git pull upstream master
               output=$(git fetch upstream "${{ env.UPSTREAM_BRANCH }}" --no-tags 2>&1)
               exit_code=$?
 
@@ -262,7 +261,7 @@ jobs:
 
             while [ $attempt -le $max ]; do
               echo "Push attempt ${attempt}/${max}..."
-              output=$(git push origin "${{ env.ORIGIN_BRANCH }}" 2>&1)
+              output=$(git push origin "${{ env.ORIGIN_BRANCH }}" --force-with-lease 2>&1)
               exit_code=$?
 
               echo "  [attempt ${attempt}] exit=${exit_code}" >> "${{ env.LOG_FILE }}"
