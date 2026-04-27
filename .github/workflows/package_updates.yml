@@ -126,14 +126,15 @@ jobs:
       - name: Process package updates
         env:
           GITHUB_TOKEN: ${{ secrets.TERMUXBOT2_TOKEN }}
+          GITHUB_ACTOR: "pkgitbot"
           BUILD_PACKAGES: "true"
           CREATE_ISSUE: "true"
           GIT_COMMIT_PACKAGES: "true"
           GIT_PUSH_PACKAGES: "true"
           MANUAL_INPUT_PACKAGES: ${{ github.event.inputs.packages }}
         run: |
-          git config --global user.name "Termux Github Actions"
-          git config --global user.email "contact@termux.dev"
+          git config --global user.name "pkgitbot"
+          git config --global user.email "pkgitbot@users.noreply.github.com"
 
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             # Ensure MANUAL_INPUT_PACKAGES is newline free, and put it
@@ -151,4 +152,4 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.TERMUXBOT2_TOKEN }}" \
             -X POST \
             --data '{"ref":"master"}' \
-            "https://api.github.com/repos/termux/repology-metadata/actions/workflows/repology_metadata.yml/dispatches"
+            "https://api.github.com/repos/strsp/repology-metadata/actions/workflows/repology_metadata.yml/dispatches"
