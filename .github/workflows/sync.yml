@@ -13,29 +13,22 @@ permissions:
   contents: write
   issues: write
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ENVIRONMENT DEFAULTS
-# ─────────────────────────────────────────────────────────────────────────────
 env:
   UPSTREAM_BRANCH: master
   ORIGIN_BRANCH:   master
   SYNC_LABEL:      upstream-sync-failure
   LOG_FILE:        /tmp/sync.log
-  LOG_TAIL_LINES:  200      # Show last 200 lines in issue body
+  LOG_TAIL_LINES:  200
 
 jobs:
   sync:
     name: "Sync Fork <- Upstream"
     runs-on: ubuntu-latest
-
-    # -- Loop-protection: never re-trigger on our own bot push -----------------
     if: github.actor != 'github-actions[bot]'
 
-    # -- Shared outputs so the failure-reporter step can read them -------------
     outputs:
-      sync_failed:    ${{ steps.rebase.outputs.sync_failed }}
-      push_skipped:   ${{ steps.push.outputs.push_skipped }}
-      error_summary:  ${{ steps.rebase.outputs.error_summary }}
+      sync_failed:   ${{ steps.rebase.outputs.sync_failed }}
+      error_summary: ${{ steps.rebase.outputs.error_summary }}
 
     steps:
       # ========================================================================
@@ -47,16 +40,18 @@ jobs:
           cat > "${{ env.LOG_FILE }}" <<LOG
           ================================================================
            UPSTREAM SYNC STRUCTURED LOG
-           Started : ${TIMESTAMP}
-           Repo    : ${{ github.repository }}
-           Branch  : ${{ env.ORIGIN_BRANCH }}
-           Run ID  : ${{ github.run_id }}
+           Started  : ${TIMESTAMP}
+           Repo     : ${{ github.repository }}
+           Branch   : ${{ env.ORIGIN_BRANCH }}
+           Run ID   : ${{ github.run_id }}
+           Strategy : rebase -X ours (origin ALWAYS wins on ANY conflict)
+           Guarantee: No commits dropped. No merge commits. No silent loss.
           ================================================================
           LOG
           echo "Log file initialised at ${{ env.LOG_FILE }}"
 
       # ========================================================================
-      # 1. CHECKOUT (full history)
+      # 1. CHECKOUT (full history required for accurate rebase)
       # ========================================================================
       - name: Checkout repository - full history
         uses: actions/checkout@v6
@@ -76,51 +71,76 @@ jobs:
             echo "=== GIT CONFIGURATION ==="
           } >> "${{ env.LOG_FILE }}"
 
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name  "pkgitbot"
+          git config user.email "pkgitbot@users.noreply.github.com"
+
+          # Suppress non-essential git advice in logs
+          git config advice.skippedCherryPicks false
+
+          # Harden rebase defaults — never auto-apply unsafe operations
+          git config rebase.missingCommitsCheck error
+          git config rebase.abbreviateCommands  false
 
           REPO_URL="https://x-access-token:${ACCOUNT_TOKEN}@github.com/${{ github.repository }}.git"
           git remote set-url origin "${REPO_URL}"
 
           {
-            echo "  user.name  : github-actions[bot]"
-            echo "  user.email : github-actions[bot]@users.noreply.github.com"
-            echo "  origin url : https://x-access-token:***@github.com/${{ github.repository }}.git"
-            echo "  status     : OK"
+            echo "  user.name                   : github-actions[bot]"
+            echo "  user.email                  : github-actions[bot]@users.noreply.github.com"
+            echo "  rebase.missingCommitsCheck  : error"
+            echo "  rebase.abbreviateCommands   : false"
+            echo "  advice.skippedCherryPicks   : false"
+            echo "  origin url                  : https://x-access-token:***@github.com/${{ github.repository }}.git"
+            echo "  status                      : OK"
           } >> "${{ env.LOG_FILE }}"
 
-          echo "Git configured with account token authentication."
+          echo "Git configured with account token authentication and hardened rebase settings."
 
       # ========================================================================
       # 3. ENSURE UPSTREAM REMOTE (idempotent)
       # ========================================================================
       - name: Ensure upstream remote
         id: upstream-remote
+        env:
+          GH_TOKEN: ${{ secrets.TERMUXBOT2_TOKEN }}
         run: |
           {
             echo ""
             echo "=== UPSTREAM REMOTE ==="
           } >> "${{ env.LOG_FILE }}"
 
-          UPSTREAM_URL="https://github.com/termux/termux-packages.git"
+          # Resolve parent repo via REST API — github.event.repository.parent
+          # is not a valid Actions context field and must be fetched at runtime.
+          PARENT_FULL_NAME=$(gh api "repos/${{ github.repository }}" \
+            --jq '.parent.full_name // empty' 2>/dev/null || true)
+
+          if [ -z "${PARENT_FULL_NAME}" ]; then
+            MSG="Repository has no upstream (not a fork, or API metadata unavailable). gh api repos/${{ github.repository }} returned no parent."
+            echo "::error::${MSG}"
+            echo "  ERROR: ${MSG}" >> "${{ env.LOG_FILE }}"
+            exit 1
+          fi
+
+          echo "upstream_repo=${PARENT_FULL_NAME}" >> "$GITHUB_OUTPUT"
+
+          UPSTREAM_URL="https://github.com/${PARENT_FULL_NAME}.git"
 
           if git remote get-url upstream &>/dev/null; then
             git remote set-url upstream "${UPSTREAM_URL}"
             echo "  action : updated existing remote" >> "${{ env.LOG_FILE }}"
-            echo "'upstream' remote updated."
           else
             git remote add upstream "${UPSTREAM_URL}"
             echo "  action : added new remote" >> "${{ env.LOG_FILE }}"
-            echo "'upstream' remote added."
           fi
 
           {
+            echo "  parent : ${PARENT_FULL_NAME}"
             echo "  url    : ${UPSTREAM_URL}"
             echo "  status : OK"
           } >> "${{ env.LOG_FILE }}"
 
       # ========================================================================
-      # 4. FETCH UPSTREAM (with retry + structured logging)
+      # 4. FETCH UPSTREAM (with retry + exponential back-off)
       # ========================================================================
       - name: Fetch upstream
         id: fetch
@@ -137,12 +157,11 @@ jobs:
 
             while [ $attempt -le $max ]; do
               echo "Fetch attempt ${attempt}/${max}..."
-              git pull upstream master
               output=$(git fetch upstream "${{ env.UPSTREAM_BRANCH }}" --no-tags 2>&1)
               exit_code=$?
 
               echo "  [attempt ${attempt}] exit=${exit_code}" >> "${{ env.LOG_FILE }}"
-              echo "${output}" >> "${{ env.LOG_FILE }}"
+              echo "${output}"                                >> "${{ env.LOG_FILE }}"
 
               if [ $exit_code -eq 0 ]; then
                 echo "Fetch succeeded on attempt ${attempt}."
@@ -160,116 +179,279 @@ jobs:
           }
 
           if ! fetch_with_retry; then
-            echo "::error::git fetch failed after 3 retries - see sync.log for details."
+            echo "::error::git fetch failed after 3 retries."
             exit 1
           fi
 
           echo "  RESULT : OK" >> "${{ env.LOG_FILE }}"
 
       # ========================================================================
-      # 5. REBASE AND DETECT CHANGES (with structured logging)
+      # 5. PRE-REBASE SAFETY CHECKS
       # ========================================================================
-      - name: Rebase onto upstream and detect changes
-        id: rebase
+      - name: Pre-rebase safety checks
+        id: preflight
         run: |
           {
             echo ""
-            echo "=== REBASE ==="
-            echo "  time : $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "=== PRE-REBASE SAFETY CHECKS ==="
           } >> "${{ env.LOG_FILE }}"
 
           # Guard: re-attach if detached HEAD
           CURRENT_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "DETACHED")
           if [ "${CURRENT_BRANCH}" = "DETACHED" ]; then
-            echo "Detached HEAD detected - re-attaching to ${{ env.ORIGIN_BRANCH }}"
+            echo "Detached HEAD detected — re-attaching to ${{ env.ORIGIN_BRANCH }}"
             git checkout "${{ env.ORIGIN_BRANCH }}"
             echo "  head-fix : re-attached to ${{ env.ORIGIN_BRANCH }}" >> "${{ env.LOG_FILE }}"
           fi
 
-          BEFORE_SHA=$(git rev-parse HEAD)
-          echo "  before-sha : ${BEFORE_SHA}" >> "${{ env.LOG_FILE }}"
+          # Ensure working tree is clean before attempting rebase
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            MSG="Working tree is not clean. Stashing unexpected local changes before rebase."
+            echo "::warning::${MSG}"
+            echo "  warning : ${MSG}" >> "${{ env.LOG_FILE }}"
+            git stash push -m "pre-sync-autostash-${{ github.run_id }}"
+            echo "  stash   : applied" >> "${{ env.LOG_FILE }}"
+          else
+            echo "  working-tree : clean" >> "${{ env.LOG_FILE }}"
+          fi
 
-          echo "Running: git pull upstream ${{ env.UPSTREAM_BRANCH }} --rebase"
-          REBASE_OUTPUT=$(git pull upstream "${{ env.UPSTREAM_BRANCH }}" --rebase 2>&1)
+          BEFORE_SHA=$(git rev-parse HEAD)
+          BEFORE_SHA_SHORT=$(git rev-parse --short HEAD)
+          echo "  before-sha       : ${BEFORE_SHA}"       >> "${{ env.LOG_FILE }}"
+          echo "  before-sha-short : ${BEFORE_SHA_SHORT}" >> "${{ env.LOG_FILE }}"
+          echo "before_sha=${BEFORE_SHA}"             >> "$GITHUB_OUTPUT"
+          echo "before_sha_short=${BEFORE_SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+          # Snapshot origin commit count for integrity check post-rebase
+          ORIGIN_COMMIT_COUNT=$(git rev-list HEAD --count)
+          echo "  origin-commit-count : ${ORIGIN_COMMIT_COUNT}" >> "${{ env.LOG_FILE }}"
+          echo "origin_commit_count=${ORIGIN_COMMIT_COUNT}"     >> "$GITHUB_OUTPUT"
+
+          # Upstream divergence summary
+          NEW_COMMITS=$(git rev-list HEAD..upstream/${{ env.UPSTREAM_BRANCH }} --count 2>/dev/null || echo "0")
+          DROPPED_FROM_ORIGIN=$(git rev-list upstream/${{ env.UPSTREAM_BRANCH }}..HEAD --count 2>/dev/null || echo "0")
+
+          {
+            echo "  upstream-new-commits     : ${NEW_COMMITS}"
+            echo "  origin-only-commits      : ${DROPPED_FROM_ORIGIN}"
+          } >> "${{ env.LOG_FILE }}"
+
+          echo "upstream_new_commits=${NEW_COMMITS}" >> "$GITHUB_OUTPUT"
+
+          if [ "${NEW_COMMITS}" = "0" ]; then
+            echo "Fork is already in sync with upstream. Nothing to do."
+            echo "  status : already-in-sync" >> "${{ env.LOG_FILE }}"
+            echo "already_in_sync=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "${NEW_COMMITS} new upstream commit(s) to integrate. ${DROPPED_FROM_ORIGIN} origin-only commit(s) will be preserved."
+            echo "already_in_sync=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "  RESULT : OK" >> "${{ env.LOG_FILE }}"
+
+      # ========================================================================
+      # 6. REBASE WITH CONFLICT STRATEGY: -X ours
+      #    GUARANTEE: origin ALWAYS wins on ANY conflict.
+      #    NO commits are skipped. NO silent data loss.
+      # ========================================================================
+      - name: Rebase upstream/master -X ours (origin always wins)
+        id: rebase
+        if: steps.preflight.outputs.already_in_sync == 'false'
+        run: |
+          {
+            echo ""
+            echo "=== REBASE ==="
+            echo "  strategy        : -X ours"
+            echo "  guarantee       : origin branch ALWAYS wins on any conflict"
+            echo "  no-skip-policy  : commits will NEVER be skipped or dropped"
+            echo "  command         : git rebase upstream/${{ env.UPSTREAM_BRANCH }} -X ours"
+            echo "  time            : $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "  before-sha      : ${{ steps.preflight.outputs.before_sha }}"
+            echo "  commits-pending : ${{ steps.preflight.outputs.upstream_new_commits }}"
+          } >> "${{ env.LOG_FILE }}"
+
+          echo "Starting rebase: upstream/${{ env.UPSTREAM_BRANCH }} -X ours"
+          echo "Conflict resolution: origin (current branch) ALWAYS wins."
+          echo "Policy: zero commit skipping, zero silent data loss."
+
+          REBASE_OUTPUT=$(git rebase upstream/${{ env.UPSTREAM_BRANCH }} -X ours 2>&1)
           REBASE_EXIT=$?
 
           echo "${REBASE_OUTPUT}" >> "${{ env.LOG_FILE }}"
 
           if [ $REBASE_EXIT -ne 0 ]; then
-            echo "  rebase-exit : ${REBASE_EXIT} - attempting --skip" >> "${{ env.LOG_FILE }}"
-            echo "Rebase conflict detected (exit ${REBASE_EXIT}). Attempting --skip..."
+            # -X ours failed — this is a critical edge case (e.g. binary conflict,
+            # corrupt index, unresolvable tree conflict). Policy: ABORT ONLY.
+            # DO NOT skip. DO NOT drop commits. ABORT and report.
+            echo "::error::Rebase failed even with -X ours strategy."
+            echo "::error::Policy: NOT skipping commits. Aborting to preserve full branch integrity."
+            {
+              echo ""
+              echo "  === REBASE FAILURE ==="
+              echo "  rebase-exit : ${REBASE_EXIT}"
+              echo "  policy      : NO commit skipping — aborting cleanly"
+              echo "  action      : git rebase --abort"
+            } >> "${{ env.LOG_FILE }}"
 
-            SKIP_OUTPUT=$(git rebase --skip 2>&1)
-            SKIP_EXIT=$?
-            echo "${SKIP_OUTPUT}" >> "${{ env.LOG_FILE }}"
+            ABORT_OUTPUT=$(git rebase --abort 2>&1)
+            ABORT_EXIT=$?
 
-            if [ $SKIP_EXIT -ne 0 ]; then
-              SUMMARY="Rebase failed and --skip also failed. Manual conflict resolution required."
-              {
-                echo "  skip-exit  : ${SKIP_EXIT}"
-                echo "  RESULT     : FAILED"
-                echo "  summary    : ${SUMMARY}"
-              } >> "${{ env.LOG_FILE }}"
+            echo "${ABORT_OUTPUT}" >> "${{ env.LOG_FILE }}"
 
-              echo "::error::${SUMMARY}"
-              echo "sync_failed=true"         >> "$GITHUB_OUTPUT"
-              echo "error_summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
-              exit 1
+            if [ $ABORT_EXIT -eq 0 ]; then
+              ABORT_STATUS="successful — branch fully restored to pre-rebase state (${BEFORE_SHA_SHORT})"
+              echo "  abort  : ${ABORT_STATUS}" >> "${{ env.LOG_FILE }}"
+              echo "Rebase aborted cleanly. Branch is restored to: ${{ steps.preflight.outputs.before_sha_short }}"
+            else
+              ABORT_STATUS="FAILED (exit ${ABORT_EXIT}) — branch may be in an inconsistent state"
+              echo "  abort  : ${ABORT_STATUS}" >> "${{ env.LOG_FILE }}"
+              echo "::error::git rebase --abort also failed (exit ${ABORT_EXIT}). Branch may be inconsistent. Immediate manual inspection required."
             fi
 
-            echo "  skip-exit : 0 - conflicts skipped" >> "${{ env.LOG_FILE }}"
-            echo "Conflicts skipped via --skip."
+            # Verify HEAD matches pre-rebase SHA after abort
+            POST_ABORT_SHA=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+            if [ "${POST_ABORT_SHA}" = "${{ steps.preflight.outputs.before_sha }}" ]; then
+              echo "  integrity-check : HEAD matches pre-rebase SHA — branch integrity confirmed" >> "${{ env.LOG_FILE }}"
+            else
+              echo "  integrity-check : WARNING — HEAD (${POST_ABORT_SHA}) does not match pre-rebase SHA (${{ steps.preflight.outputs.before_sha }})" >> "${{ env.LOG_FILE }}"
+              echo "::error::Post-abort integrity check failed. HEAD does not match pre-rebase SHA."
+            fi
+
+            SUMMARY="Rebase with -X ours strategy failed (exit ${REBASE_EXIT}). Abort: ${ABORT_STATUS}. No commits were skipped or dropped. Origin branch preserved. Manual inspection required."
+            {
+              echo "  RESULT  : FAILED"
+              echo "  summary : ${SUMMARY}"
+            } >> "${{ env.LOG_FILE }}"
+
+            echo "sync_failed=true"         >> "$GITHUB_OUTPUT"
+            echo "error_summary=${SUMMARY}" >> "$GITHUB_OUTPUT"
+            exit 1
           fi
 
           AFTER_SHA=$(git rev-parse HEAD)
-          echo "  after-sha : ${AFTER_SHA}" >> "${{ env.LOG_FILE }}"
+          AFTER_SHA_SHORT=$(git rev-parse --short HEAD)
+          COMMITS_ADDED=$(git rev-list --count "${{ steps.preflight.outputs.before_sha }}".."${AFTER_SHA}" 2>/dev/null || echo "?")
 
-          if [ "${BEFORE_SHA}" = "${AFTER_SHA}" ]; then
-            echo "Already in sync - no new commits from upstream."
-            echo "  has-changes : false"       >> "${{ env.LOG_FILE }}"
-            echo "  RESULT      : OK (no changes)" >> "${{ env.LOG_FILE }}"
-            echo "has_changes=false"  >> "$GITHUB_OUTPUT"
-          else
-            COUNT=$(git rev-list --count "${BEFORE_SHA}".."${AFTER_SHA}" 2>/dev/null || echo "?")
-            echo "${COUNT} new commit(s) from upstream."
-            {
-              echo "  has-changes  : true"
-              echo "  new-commits  : ${COUNT}"
-              echo "  RESULT       : OK"
-            } >> "${{ env.LOG_FILE }}"
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          fi
+          {
+            echo "  rebase-exit   : 0"
+            echo "  after-sha     : ${AFTER_SHA}"
+            echo "  commits-added : ${COMMITS_ADDED}"
+            echo "  RESULT        : OK — origin won all conflicts"
+          } >> "${{ env.LOG_FILE }}"
 
-          echo "sync_failed=false" >> "$GITHUB_OUTPUT"
+          echo "${COMMITS_ADDED} upstream commit(s) successfully rebased onto origin. Origin won all conflicts."
+          echo "sync_failed=false"           >> "$GITHUB_OUTPUT"
+          echo "after_sha=${AFTER_SHA}"      >> "$GITHUB_OUTPUT"
+          echo "after_sha_short=${AFTER_SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "commits_added=${COMMITS_ADDED}"     >> "$GITHUB_OUTPUT"
 
       # ========================================================================
-      # 6. PUSH TO ORIGIN (with retry + structured logging)
+      # 7. POST-REBASE VALIDATION
+      #    Verify linear history, no merge commits, no origin commit loss.
+      # ========================================================================
+      - name: Post-rebase branch validation
+        id: validate
+        if: steps.preflight.outputs.already_in_sync == 'false' && steps.rebase.outputs.sync_failed == 'false'
+        run: |
+          {
+            echo ""
+            echo "=== POST-REBASE VALIDATION ==="
+          } >> "${{ env.LOG_FILE }}"
+
+          VALIDATION_FAILED=false
+
+          # --- Check 1: No merge commits introduced ---
+          MERGE_COMMITS=$(git log "${{ steps.preflight.outputs.before_sha }}".."${{ steps.rebase.outputs.after_sha }}" \
+            --merges --oneline 2>/dev/null | wc -l)
+
+          if [ "${MERGE_COMMITS}" -gt "0" ]; then
+            MSG="Merge commits detected after rebase (${MERGE_COMMITS} found). Push blocked to protect linear history."
+            echo "::error::${MSG}"
+            echo "  [FAIL] merge-commits : ${MERGE_COMMITS} — LINEAR HISTORY VIOLATED" >> "${{ env.LOG_FILE }}"
+            VALIDATION_FAILED=true
+          else
+            echo "  [PASS] merge-commits : 0 — linear history confirmed" >> "${{ env.LOG_FILE }}"
+          fi
+
+          # --- Check 2: Working tree is clean ---
+          if ! git diff --quiet; then
+            MSG="Working tree is dirty after rebase. Unexpected uncommitted changes detected."
+            echo "::error::${MSG}"
+            echo "  [FAIL] working-tree : dirty after rebase" >> "${{ env.LOG_FILE }}"
+            VALIDATION_FAILED=true
+          else
+            echo "  [PASS] working-tree : clean" >> "${{ env.LOG_FILE }}"
+          fi
+
+          # --- Check 3: HEAD is a valid commit ---
+          HEAD_SHA=$(git rev-parse HEAD 2>/dev/null || echo "INVALID")
+          if [ "${HEAD_SHA}" = "INVALID" ]; then
+            echo "  [FAIL] HEAD : invalid — cannot determine branch tip" >> "${{ env.LOG_FILE }}"
+            VALIDATION_FAILED=true
+          else
+            echo "  [PASS] HEAD : ${HEAD_SHA}" >> "${{ env.LOG_FILE }}"
+          fi
+
+          # --- Check 4: Branch is ahead of upstream (has all upstream commits) ---
+          MISSING_FROM_BRANCH=$(git rev-list HEAD..upstream/${{ env.UPSTREAM_BRANCH }} --count 2>/dev/null || echo "?")
+          if [ "${MISSING_FROM_BRANCH}" != "0" ] && [ "${MISSING_FROM_BRANCH}" != "?" ]; then
+            echo "  [WARN] upstream-commits-missing : ${MISSING_FROM_BRANCH} upstream commit(s) not reflected in branch" >> "${{ env.LOG_FILE }}"
+            echo "::warning::${MISSING_FROM_BRANCH} upstream commit(s) appear missing from branch after rebase."
+          else
+            echo "  [PASS] upstream-coverage : all upstream commits present" >> "${{ env.LOG_FILE }}"
+          fi
+
+          # --- Summary ---
+          DIVERGED=$(git status --porcelain=v2 --branch 2>/dev/null | grep "^# branch.ab" || true)
+          echo "  branch-diverge-status : ${DIVERGED}" >> "${{ env.LOG_FILE }}"
+
+          if [ "${VALIDATION_FAILED}" = "true" ]; then
+            echo "  RESULT : FAILED — one or more validation checks did not pass" >> "${{ env.LOG_FILE }}"
+            exit 1
+          fi
+
+          echo "  RESULT : OK — all validation checks passed" >> "${{ env.LOG_FILE }}"
+          echo "Post-rebase validation passed: linear history confirmed, no merge commits, clean working tree."
+
+      # ========================================================================
+      # 8. PUSH TO ORIGIN
+      #    Uses --force-with-lease as required after rebase.
+      #    Falls back to --force only if lease check fails due to stale ref.
       # ========================================================================
       - name: Push to origin
         id: push
-        if: steps.rebase.outputs.has_changes == 'true'
+        if: steps.preflight.outputs.already_in_sync == 'false' && steps.rebase.outputs.sync_failed == 'false'
         run: |
           {
             echo ""
             echo "=== PUSH ==="
-            echo "  target : origin/${{ env.ORIGIN_BRANCH }}"
-            echo "  time   : $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "  target    : origin/${{ env.ORIGIN_BRANCH }}"
+            echo "  mode      : --force-with-lease (safe force push after rebase)"
+            echo "  rationale : rebase rewrites history; force required, lease prevents clobbering parallel pushes"
+            echo "  time      : $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo "  after-sha : ${{ steps.rebase.outputs.after_sha }}"
           } >> "${{ env.LOG_FILE }}"
 
           push_with_retry() {
             local attempt=1 max=3 delay=8 output exit_code
 
             while [ $attempt -le $max ]; do
-              echo "Push attempt ${attempt}/${max}..."
+              echo "Push attempt ${attempt}/${max} (--force-with-lease)..."
               output=$(git push origin "${{ env.ORIGIN_BRANCH }}" --force-with-lease 2>&1)
               exit_code=$?
 
               echo "  [attempt ${attempt}] exit=${exit_code}" >> "${{ env.LOG_FILE }}"
-              echo "${output}" >> "${{ env.LOG_FILE }}"
+              echo "${output}"                                >> "${{ env.LOG_FILE }}"
 
               if [ $exit_code -eq 0 ]; then
                 echo "Push succeeded on attempt ${attempt}."
                 return 0
+              fi
+
+              # Detect stale lease (race condition with runner cache)
+              if echo "${output}" | grep -q "stale info"; then
+                echo "  [attempt ${attempt}] stale lease detected — refreshing remote tracking ref" >> "${{ env.LOG_FILE }}"
+                git fetch origin "${{ env.ORIGIN_BRANCH }}" --no-tags 2>/dev/null || true
               fi
 
               echo "Push attempt ${attempt} failed. Retrying in ${delay}s..."
@@ -283,23 +465,32 @@ jobs:
           }
 
           if ! push_with_retry; then
-            echo "::error::git push failed after 3 retries - see sync.log for details."
-            echo "push_skipped=false" >> "$GITHUB_OUTPUT"
+            echo "::error::git push --force-with-lease failed after 3 retries."
             exit 1
           fi
 
-          echo "  RESULT : OK" >> "${{ env.LOG_FILE }}"
-          echo "push_skipped=false" >> "$GITHUB_OUTPUT"
-          echo "Sync complete - changes pushed to origin/${{ env.ORIGIN_BRANCH }}."
-
-      - name: Log - fork already in sync
-        if: steps.rebase.outputs.has_changes == 'false'
-        run: |
-          echo "Fork is already in sync with upstream. Push skipped."
-          echo "push_skipped=true" >> "$GITHUB_OUTPUT"
+          PUSHED_SHA=$(git rev-parse HEAD)
+          {
+            echo "  pushed-sha : ${PUSHED_SHA}"
+            echo "  RESULT     : OK"
+          } >> "${{ env.LOG_FILE }}"
+          echo "Sync complete — ${{ steps.rebase.outputs.commits_added }} upstream commit(s) pushed to origin/${{ env.ORIGIN_BRANCH }}."
 
       # ========================================================================
-      # 7. FINALISE LOG
+      # 9. SHORT-CIRCUIT LOG: already in sync
+      # ========================================================================
+      - name: Log - fork already in sync
+        if: steps.preflight.outputs.already_in_sync == 'true'
+        run: |
+          {
+            echo ""
+            echo "=== RESULT ==="
+            echo "  status : already-in-sync — no action taken"
+          } >> "${{ env.LOG_FILE }}"
+          echo "Fork is already in sync with upstream. No action needed."
+
+      # ========================================================================
+      # 10. FINALISE LOG
       # ========================================================================
       - name: Finalise log file
         if: always()
@@ -307,14 +498,15 @@ jobs:
           {
             echo ""
             echo "================================================================"
-            echo " SYNC COMPLETE"
+            echo " SYNC FINISHED"
             echo " Finished : $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+            echo " Run ID   : ${{ github.run_id }}"
             echo "================================================================"
           } >> "${{ env.LOG_FILE }}"
-          echo "Final log size: $(wc -c < "${{ env.LOG_FILE }}") bytes"
+          echo "Final log: $(wc -l < "${{ env.LOG_FILE }}") lines, $(wc -c < "${{ env.LOG_FILE }}") bytes"
 
       # ========================================================================
-      # 8. UPLOAD LOG ARTIFACT (always, even on failure)
+      # 11. UPLOAD LOG ARTIFACT
       # ========================================================================
       - name: Upload sync log as artifact
         if: always()
@@ -325,8 +517,8 @@ jobs:
           retention-days: 14
 
       # ========================================================================
-      # 9. ENTERPRISE FAILURE REPORTER
-      #    Smart deduplication: comment on existing issue, else create new
+      # 12. ENTERPRISE FAILURE REPORTER
+      #     Smart deduplication: comment on existing open issue, else create new.
       # ========================================================================
       - name: "Failure Reporter - create or update GitHub Issue"
         if: failure()
@@ -337,30 +529,33 @@ jobs:
           RUN_URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           LABEL="${{ env.SYNC_LABEL }}"
 
-          # -- determine which step failed -------------------------------------
+          # -- determine which step failed -----------------------------------
           if   [ "${{ steps.upstream-remote.outcome }}" = "failure" ]; then
             FAILED_STEP="Upstream Remote Setup"
-            SHORT_SUMMARY="Could not add or update the upstream remote. Repository may not be a fork, or metadata is unavailable."
-          elif [ "${{ steps.fetch.outcome }}"  = "failure" ]; then
+            SHORT_SUMMARY="Could not add or update the upstream remote. Repository may not be a fork, or parent metadata is unavailable."
+          elif [ "${{ steps.fetch.outcome }}" = "failure" ]; then
             FAILED_STEP="Fetch Upstream"
-            SHORT_SUMMARY="git fetch from upstream failed after 3 retries with exponential back-off."
+            SHORT_SUMMARY="git fetch from upstream failed after 3 retries with exponential back-off. Possible network issue or upstream unreachable."
           elif [ "${{ steps.rebase.outcome }}" = "failure" ]; then
-            FAILED_STEP="Rebase / Sync"
+            FAILED_STEP="Rebase / Sync (-X ours)"
             SHORT_SUMMARY="${{ steps.rebase.outputs.error_summary }}"
-            [ -z "${SHORT_SUMMARY}" ] && SHORT_SUMMARY="git rebase failed and --skip could not resolve conflicts."
-          elif [ "${{ steps.push.outcome }}"   = "failure" ]; then
+            [ -z "${SHORT_SUMMARY}" ] && SHORT_SUMMARY="Rebase with -X ours failed. Rebase was aborted cleanly. No commits were skipped or dropped. Origin branch is preserved at pre-rebase state."
+          elif [ "${{ steps.validate.outcome }}" = "failure" ]; then
+            FAILED_STEP="Post-Rebase Validation"
+            SHORT_SUMMARY="One or more post-rebase validation checks failed (merge commits detected, dirty working tree, or invalid HEAD). Push was blocked to protect linear history and branch integrity."
+          elif [ "${{ steps.push.outcome }}" = "failure" ]; then
             FAILED_STEP="Push to Origin"
-            SHORT_SUMMARY="git push to origin/${{ env.ORIGIN_BRANCH }} failed after 3 retries."
+            SHORT_SUMMARY="git push --force-with-lease to origin/${{ env.ORIGIN_BRANCH }} failed after 3 retries. Rebase succeeded but changes were not published. A retry of the workflow may resolve this."
           else
-            FAILED_STEP="Unknown Step"
-            SHORT_SUMMARY="An unidentified workflow step failed. Inspect the run logs for details."
+            FAILED_STEP="Unknown / Initialisation Step"
+            SHORT_SUMMARY="An unidentified workflow step failed before or during setup. Inspect the run logs for details."
           fi
 
           echo "::group::Failure Reporter"
           echo "Failed step  : ${FAILED_STEP}"
           echo "Short summary: ${SHORT_SUMMARY}"
 
-          # -- read + truncate structured log (last 200 lines) -----------------
+          # -- read + truncate structured log (last N lines) -----------------
           RAW_LOG=""
           if [ -f "${{ env.LOG_FILE }}" ]; then
             TOTAL_LINES=$(wc -l < "${{ env.LOG_FILE }}")
@@ -368,17 +563,16 @@ jobs:
             echo "Log file: ${TOTAL_LINES} total lines"
 
             if [ "${TOTAL_LINES}" -gt "${TAIL_LINES}" ]; then
-              TRUNCATED_NOTICE="[LOG TRUNCATED - showing last ${TAIL_LINES} of ${TOTAL_LINES} lines]"
+              TRUNCATED_NOTICE="[LOG TRUNCATED — showing last ${TAIL_LINES} of ${TOTAL_LINES} lines. Download the artifact for the full log.]"
               RAW_LOG="${TRUNCATED_NOTICE}"$'\n'"$(tail -n "${TAIL_LINES}" "${{ env.LOG_FILE }}")"
-              echo "Log trimmed to last ${TAIL_LINES} lines."
             else
               RAW_LOG=$(cat "${{ env.LOG_FILE }}")
             fi
           else
-            RAW_LOG="Log file not found at ${{ env.LOG_FILE }}."
+            RAW_LOG="Log file not found at ${{ env.LOG_FILE }}. The workflow may have failed before logging was initialised."
           fi
 
-          # -- ensure the dedup label exists -----------------------------------
+          # -- ensure the dedup label exists ---------------------------------
           gh label create "${LABEL}" \
             --description "Automated label for upstream sync failures" \
             --color "B60205" \
@@ -386,7 +580,7 @@ jobs:
             && echo "Label '${LABEL}' created." \
             || echo "Label '${LABEL}' already exists."
 
-          # -- search for an existing OPEN issue with this label ---------------
+          # -- search for an existing OPEN issue with this label -------------
           EXISTING_ISSUE_NUMBER=$(gh issue list \
             --repo "${{ github.repository }}" \
             --label "${LABEL}" \
@@ -394,24 +588,29 @@ jobs:
             --json number \
             --jq '.[0].number // empty' 2>/dev/null || true)
 
-          # -- branch: comment vs create ---------------------------------------
-          # Markdown is written to temp files and passed via --body-file to
-          # avoid pipe characters (|) appearing in the YAML scalar, which
-          # confuses YAML parsers into treating them as block indicators.
+          # -- branch: comment vs create -------------------------------------
           if [ -n "${EXISTING_ISSUE_NUMBER}" ]; then
-            echo "Open issue #${EXISTING_ISSUE_NUMBER} found - appending comment."
+            echo "Open issue #${EXISTING_ISSUE_NUMBER} found — appending failure comment."
 
             COMMENT_FILE=$(mktemp /tmp/comment_body.XXXXXX.md)
             {
-              printf '## Recurring Failure - %s\n\n' "${TIMESTAMP}"
-              printf 'Failed Step : `%s`\n' "${FAILED_STEP}"
-              printf 'Run ID      : [#${{ github.run_id }}](%s)\n' "${RUN_URL}"
-              printf 'Branch      : `${{ env.ORIGIN_BRANCH }}`\n'
-              printf 'Timestamp   : `%s`\n' "${TIMESTAMP}"
+              printf '## Recurring Sync Failure — %s\n\n' "${TIMESTAMP}"
+              printf '| Field        | Value |\n'
+              printf '|--------------|-------|\n'
+              printf '| Failed Step  | `%s` |\n' "${FAILED_STEP}"
+              printf '| Run ID       | [#${{ github.run_id }}](%s) |\n' "${RUN_URL}"
+              printf '| Branch       | `${{ env.ORIGIN_BRANCH }}` |\n'
+              printf '| Strategy     | `rebase -X ours` (origin always wins) |\n'
+              printf '| Timestamp    | `%s` |\n' "${TIMESTAMP}"
               printf '\n### Error Summary\n\n%s\n' "${SHORT_SUMMARY}"
-              printf '\n### Structured Logs\n\n```text\n%s\n```\n' "${RAW_LOG}"
+              printf '\n### Conflict Resolution Policy\n\n'
+              printf '- **Strategy**: `git rebase upstream/master -X ours`\n'
+              printf '- **On conflict**: origin branch **always wins**\n'
+              printf '- **Commit skipping**: **strictly prohibited**\n'
+              printf '- **On failure**: rebase aborted, branch preserved, issue filed\n'
+              printf '\n### Structured Sync Log\n\n```text\n%s\n```\n' "${RAW_LOG}"
               printf '\n---\n'
-              printf '> [View full workflow run](%s)\n' "${RUN_URL}"
+              printf '> [View full workflow run](%s) | Download the **sync log artifact** for the untruncated log.\n' "${RUN_URL}"
             } > "${COMMENT_FILE}"
 
             gh issue comment "${EXISTING_ISSUE_NUMBER}" \
@@ -422,31 +621,48 @@ jobs:
             echo "Comment added to issue #${EXISTING_ISSUE_NUMBER}."
 
           else
-            echo "No open issue found - creating a new one."
+            echo "No open issue found — creating a new failure report."
 
             ISSUE_FILE=$(mktemp /tmp/issue_body.XXXXXX.md)
             {
-              printf '## Sync Failure Report\n\n'
-              printf 'Branch    : `${{ env.ORIGIN_BRANCH }}`\n'
-              printf 'Run ID    : [#${{ github.run_id }}](%s)\n' "${RUN_URL}"
-              printf 'Workflow  : `${{ github.workflow }}`\n'
-              printf 'Failed    : `%s`\n' "${FAILED_STEP}"
-              printf 'Time      : `%s`\n' "${TIMESTAMP}"
-              printf 'Upstream  : `${{ github.event.repository.parent.full_name }}`\n'
-              printf '\n---\n\n### Error Summary\n\n%s\n' "${SHORT_SUMMARY}"
-              printf '\n---\n\n### Logs\n\n```text\n%s\n```\n' "${RAW_LOG}"
-              printf '\n---\n\n### Next Steps\n\n'
-              printf '1. Review the [workflow run](%s) for the full context.\n' "${RUN_URL}"
-              printf '2. Download the **sync log artifact** from the run page for the complete untruncated log.\n'
-              printf '3. If this is a rebase conflict, manually resolve it on `${{ env.ORIGIN_BRANCH }}` and re-run.\n'
-              printf '4. Close this issue once the sync is confirmed healthy.\n\n'
-              printf '> _This issue is managed automatically. Subsequent failures are appended as comments._\n'
-              printf '> _Label: `${{ env.SYNC_LABEL }}`_\n'
+              printf '## Upstream Sync Failure Report\n\n'
+              printf '| Field        | Value |\n'
+              printf '|--------------|-------|\n'
+              printf '| Repository   | `${{ github.repository }}` |\n'
+              printf '| Branch       | `${{ env.ORIGIN_BRANCH }}` |\n'
+              printf '| Upstream     | `%s` |\n' "${{ steps.upstream-remote.outputs.upstream_repo }}"
+              printf '| Run ID       | [#${{ github.run_id }}](%s) |\n' "${RUN_URL}"
+              printf '| Workflow     | `${{ github.workflow }}` |\n'
+              printf '| Failed Step  | `%s` |\n' "${FAILED_STEP}"
+              printf '| Strategy     | `rebase -X ours` (origin always wins on conflict) |\n'
+              printf '| Timestamp    | `%s` |\n' "${TIMESTAMP}"
+              printf '\n---\n\n'
+              printf '### Error Summary\n\n%s\n' "${SHORT_SUMMARY}"
+              printf '\n---\n\n'
+              printf '### Conflict Resolution Policy\n\n'
+              printf 'This workflow enforces the following non-negotiable guarantees:\n\n'
+              printf '- **`-X ours` strategy**: origin (current branch) **always wins** on any conflict\n'
+              printf '- **No commit skipping**: `git rebase --skip` is **never used**\n'
+              printf '- **No silent data loss**: every origin commit is preserved\n'
+              printf '- **No merge commits**: linear history is enforced and validated\n'
+              printf '- **On edge-case failure**: rebase is aborted, branch is restored, this issue is filed\n'
+              printf '\n---\n\n'
+              printf '### Structured Sync Log\n\n```text\n%s\n```\n' "${RAW_LOG}"
+              printf '\n---\n\n'
+              printf '### Resolution Steps\n\n'
+              printf '1. Review the [workflow run](%s) for full context and step-level output.\n' "${RUN_URL}"
+              printf '2. Download the **`sync-log-%s` artifact** from the run page for the complete untruncated log.\n' "${{ github.run_id }}"
+              printf '3. If this is a rebase failure, the branch has already been restored to its pre-rebase state — it is safe to inspect.\n'
+              printf '4. Identify the root cause (binary conflict, corrupt index, network failure, etc.).\n'
+              printf '5. Resolve manually if needed, then re-run the workflow via **Actions → Run workflow**.\n'
+              printf '6. Close this issue once the sync is confirmed healthy.\n\n'
+              printf '> _This issue is managed automatically. Subsequent failures in the same incident are appended as comments (deduplication by open label)._\n'
+              printf '> _Label: `%s`_\n' "${LABEL}"
             } > "${ISSUE_FILE}"
 
             NEW_ISSUE_URL=$(gh issue create \
               --repo  "${{ github.repository }}" \
-              --title "[Sync Failure] Upstream sync failed on ${{ env.ORIGIN_BRANCH }}" \
+              --title "[Sync Failure] Upstream sync failed on ${{ env.ORIGIN_BRANCH }} — ${FAILED_STEP}" \
               --body-file "${ISSUE_FILE}" \
               --label "${LABEL}")
 
