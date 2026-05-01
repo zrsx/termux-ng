@@ -1,0 +1,13 @@
+diff --git a/configure b/configure
+index 89edc42..f7e868c 100755
+--- a/configure
++++ b/configure
+@@ -6955,6 +6955,8 @@ rm -f conftest.c conftest.out
+ { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for multiarch" >&5
+ printf %s "checking for multiarch... " >&6; }
+ case $ac_sys_system in #(
++  Linux-android) :
++    MULTIARCH="" ;; #(
+   Darwin*) :
+     MULTIARCH="" ;; #(
+   FreeBSD*) :

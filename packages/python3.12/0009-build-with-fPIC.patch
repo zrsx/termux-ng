@@ -1,0 +1,26 @@
+diff --git a/configure b/configure
+index f291f38..9b3f936 100755
+--- a/configure
++++ b/configure
+@@ -12902,7 +12902,7 @@ then
+ 		 then CCSHARED="-fPIC";
+ 		 else CCSHARED="+z";
+ 		 fi;;
+-	Linux-android*) ;;
++	Linux-android*) CCSHARED="-fPIC";;
+ 	Linux*|GNU*) CCSHARED="-fPIC";;
+ 	Emscripten*|WASI*)
+ 		if test "x$enable_wasm_dynamic_linking" = xyes
+diff --git a/configure.ac b/configure.ac
+index 1a02d19..37f4a2e 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -3464,7 +3464,7 @@ then
+ 		 then CCSHARED="-fPIC";
+ 		 else CCSHARED="+z";
+ 		 fi;;
+-	Linux-android*) ;;
++	Linux-android*) CCSHARED="-fPIC";;
+ 	Linux*|GNU*) CCSHARED="-fPIC";;
+ 	Emscripten*|WASI*)
+ 		AS_VAR_IF([enable_wasm_dynamic_linking], [yes], [

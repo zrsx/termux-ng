@@ -1,0 +1,15 @@
+diff --git a/Lib/http/server.py b/Lib/http/server.py
+index 19fe157..9f9ed56 100644
+--- a/Lib/http/server.py
++++ b/Lib/http/server.py
+@@ -1187,10 +1187,6 @@ def run_cgi(self):
+                 return
+             # Child
+             try:
+-                try:
+-                    os.setuid(nobody)
+-                except OSError:
+-                    pass
+                 os.dup2(self.rfile.fileno(), 0)
+                 os.dup2(self.wfile.fileno(), 1)
+                 os.execve(scriptfile, args, env)
