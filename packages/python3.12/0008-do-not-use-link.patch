@@ -1,0 +1,12 @@
+diff --git a/configure b/configure
+index f7e868c..f291f38 100755
+--- a/configure
++++ b/configure
+@@ -18836,7 +18836,6 @@ printf "%s\n" "$ac_cv_func_link" >&6; }
+   if test "x$ac_cv_func_link" = xyes
+ then :
+ 
+-printf "%s\n" "#define HAVE_LINK 1" >>confdefs.h
+ 
+ fi
+ 
