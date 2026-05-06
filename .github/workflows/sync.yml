@@ -111,8 +111,7 @@ jobs:
 
           # Resolve parent repo via REST API — github.event.repository.parent
           # is not a valid Actions context field and must be fetched at runtime.
-          PARENT_FULL_NAME=$(gh api "repos/${{ github.repository }}" \
-            --jq '.parent.full_name // empty' 2>/dev/null || true)
+          PARENT_FULL_NAME="termux/termux-packages"
 
           if [ -z "${PARENT_FULL_NAME}" ]; then
             MSG="Repository has no upstream (not a fork, or API metadata unavailable). gh api repos/${{ github.repository }} returned no parent."
