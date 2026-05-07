@@ -96,7 +96,7 @@ jobs:
     permissions:
       issues: write
       contents: write
-    if: github.event_name != 'pull_request' && github.event_name != 'push' && github.repository == 'strsp/termux-ng'
+    if: github.event_name != 'pull_request' && github.event_name != 'push' && github.repository == 'zrsx/termux-ng'
     runs-on: ubuntu-24.04
     steps:
       - name: Clone repository
