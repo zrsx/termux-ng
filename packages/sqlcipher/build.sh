@@ -29,11 +29,23 @@ TCLLIBDIR=${TERMUX__PREFIX__LIB_DIR}/tcl8.6/sqlite
 
 termux_step_pre_configure() {
 	# CPPFLAGS and LDFLAGS as directed by README.md
+	# and also by the termux-packages libsqlite package so that sqlcipher
+	# can be built after libsqlite but before packages that depend on libsqlite
+	# and provide the exact same symbols as libsqlite
+	# in a single docker container building many packages
 	CPPFLAGS+=" -DSQLCIPHER_OMIT_LOG_DEVICE"
 	CPPFLAGS+=" -DSQLITE_HAS_CODEC"
 	CPPFLAGS+=" -DSQLITE_EXTRA_INIT=sqlcipher_extra_init"
 	CPPFLAGS+=" -DSQLITE_EXTRA_SHUTDOWN=sqlcipher_extra_shutdown"
+	CPPFLAGS+=" -DSQLITE_ENABLE_DBSTAT_VTAB=1"
+	CPPFLAGS+=" -DSQLITE_ENABLE_COLUMN_METADATA=1"
+	CPPFLAGS+=" -DSQLITE_ENABLE_UPDATE_DELETE_LIMIT=1"
+	CPPFLAGS+=" -DSQLITE_ENABLE_UNLOCK_NOTIFY=1"
+	CPPFLAGS+=" -DSQLITE_ENABLE_FTS3_PARENTHESIS"
+	CPPFLAGS+=" -DSQLITE_ENABLE_RBU"
+	CPPFLAGS+=" -DSQLITE_ENABLE_GEOPOLY"
 	LDFLAGS+=" -lcrypto"
+	LDFLAGS+=" -lm"
 }
 
 # See: https://github.com/termux/termux-packages/issues/23268#issuecomment-2685308408
